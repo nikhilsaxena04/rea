@@ -59,3 +59,91 @@ it.each([false, true])(
     ]);
   },
 );
+
+it("omits released child resources from aggregate live cleanup resources", () => {
+  const first = new ProviderCleanupError("provider-alpha", ["alpha-file"], {
+    reason: "alpha close failed",
+  });
+  const second = new ProviderCleanupError("provider-beta", ["beta-file"], {
+    reason: "beta close failed",
+  });
+  const aggregate = new ProviderCleanupError(
+    "composite",
+    ["alpha-file", "beta-file"],
+    {
+      reason: "composite close failed",
+      historical_resources: ["alpha-file", "beta-file"],
+    },
+  ).bindCleanupDependencies([first, second]);
+
+  expect(aggregate.cleanupIncomplete).toBe(true);
+  expect(aggregate.cleanupResources).toEqual(["alpha-file", "beta-file"]);
+  expect(projectAnalysisError(aggregate)).toMatchObject({
+    code: "cleanup_incomplete",
+    details: {
+      resources: ["alpha-file", "beta-file"],
+      diagnostics: {
+        historical_resources: ["alpha-file", "beta-file"],
+      },
+    },
+  });
+
+  first.resolveCleanup();
+
+  expect(first.cleanupIncomplete).toBe(false);
+  expect(first.cleanupResources).toEqual([]);
+  expect(aggregate.cleanupIncomplete).toBe(true);
+  expect(aggregate.cleanupResources).toEqual(["beta-file"]);
+  expect(projectAnalysisError(aggregate)).toMatchObject({
+    code: "cleanup_incomplete",
+    details: {
+      resources: ["beta-file"],
+      diagnostics: {
+        historical_resources: ["alpha-file", "beta-file"],
+      },
+    },
+  });
+});
+
+it("propagates child cleanup resolution through nested aggregates", () => {
+  const first = new ProviderCleanupError("provider-alpha", ["alpha-file"], {
+    reason: "alpha close failed",
+  });
+  const second = new ProviderCleanupError("provider-beta", ["beta-file"], {
+    reason: "beta close failed",
+  });
+  const aggregate = new ProviderCleanupError(
+    "composite",
+    ["alpha-file", "beta-file"],
+    { reason: "composite close failed" },
+  ).bindCleanupDependencies([first, second]);
+
+  const third = new ProviderCleanupError("provider-gamma", ["third-file"], {
+    reason: "gamma close failed",
+  });
+  const parentAggregate = new ProviderCleanupError(
+    "outer-composite",
+    ["alpha-file", "beta-file", "third-file"],
+    { reason: "outer close failed" },
+  ).bindCleanupDependencies([aggregate, third]);
+
+  expect(parentAggregate.cleanupIncomplete).toBe(true);
+  expect(parentAggregate.cleanupResources).toEqual([
+    "alpha-file",
+    "beta-file",
+    "third-file",
+  ]);
+
+  first.resolveCleanup();
+
+  expect(aggregate.cleanupIncomplete).toBe(true);
+  expect(aggregate.cleanupResources).toEqual(["beta-file"]);
+  expect(parentAggregate.cleanupIncomplete).toBe(true);
+  expect(parentAggregate.cleanupResources).toEqual(["beta-file", "third-file"]);
+  expect(projectAnalysisError(parentAggregate)).toMatchObject({
+    code: "cleanup_incomplete",
+    details: {
+      resources: ["beta-file", "third-file"],
+    },
+  });
+});

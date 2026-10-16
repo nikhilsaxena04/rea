@@ -68,7 +68,7 @@ export abstract class AnalysisError extends Error {
   readonly capturedOutput: AnalysisCapturedOutput | undefined;
   readonly cleanup: AnalysisCleanupObservation | undefined;
   cleanupIncomplete: boolean;
-  readonly cleanupResources: readonly string[];
+  cleanupResources: readonly string[];
   constructor(message: string, options?: AnalysisErrorOptions) {
     super(message, options);
     this.diagnostics =
@@ -81,7 +81,9 @@ export abstract class AnalysisError extends Error {
         : { ...options.capturedOutput };
     this.cleanup = options?.cleanup;
     this.cleanupIncomplete = options?.cleanup !== undefined;
-    this.cleanupResources = options?.cleanup?.resources ?? [];
+    this.cleanupResources = options?.cleanup?.resources
+      ? [...options.cleanup.resources]
+      : [];
     this.partialObservation = options?.partialObservation;
   }
   abstract readonly _tag: AnalysisErrorTag;
@@ -90,6 +92,23 @@ export abstract class AnalysisError extends Error {
   readonly executionFailure: string | undefined = undefined;
   partialObservation: AnalysisPartialObservation | undefined;
   readonly cleanupReport: ProcessCaptureCleanupReport | undefined = undefined;
+
+  #refreshBoundCleanupResources(): void {
+    if (this.#cleanupDependencies.size === 0) return;
+    this.cleanupResources = [
+      ...new Set(
+        [...this.#cleanupDependencies]
+          .filter((dependency) => dependency.cleanupIncomplete)
+          .flatMap((dependency) => dependency.cleanupResources),
+      ),
+    ];
+    for (const reference of this.#cleanupDependents) {
+      const dependent = reference.deref();
+      if (dependent !== undefined) {
+        dependent.#refreshBoundCleanupResources();
+      }
+    }
+  }
 
   /** Retain a later lifecycle failure without replacing the original typed error. */
   retainSecondaryFailure(
@@ -113,6 +132,7 @@ export abstract class AnalysisError extends Error {
   bindCleanupDependencies(dependencies: readonly AnalysisError[]): this {
     for (const dependency of dependencies) {
       if (
+        dependency === this ||
         !dependency.cleanupIncomplete ||
         this.#cleanupDependencies.has(dependency)
       )
@@ -125,22 +145,31 @@ export abstract class AnalysisError extends Error {
         new WeakRef(this),
       ];
     }
-    if (this.#cleanupDependencies.size === 0) this.resolveCleanup();
+    if (this.#cleanupDependencies.size === 0) {
+      this.resolveCleanup();
+    } else {
+      this.cleanupIncomplete = true;
+      this.#refreshBoundCleanupResources();
+    }
     return this;
   }
 
   /** Clear live cleanup status only after its owning resource confirms retry success. */
   resolveCleanup(): this {
-    if (
-      [...this.#cleanupDependencies].some(
-        (dependency) => dependency.cleanupIncomplete,
-      )
-    )
+    for (const dependency of this.#cleanupDependencies) {
+      if (!dependency.cleanupIncomplete) {
+        this.#cleanupDependencies.delete(dependency);
+      }
+    }
+    if (this.#cleanupDependencies.size > 0) {
+      this.#refreshBoundCleanupResources();
       return this;
-    this.#cleanupDependencies.clear();
+    }
     this.cleanupIncomplete = false;
-    for (const reference of this.#cleanupDependents)
+    this.cleanupResources = [];
+    for (const reference of this.#cleanupDependents) {
       reference.deref()?.resolveCleanup();
+    }
     this.#cleanupDependents = [];
     return this;
   }
